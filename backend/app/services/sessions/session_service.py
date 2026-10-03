@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -26,13 +27,13 @@ from app.services.ai.base import AIService
 from app.services.ai.mock import MockAIService
 from app.services.matching.matching_service import MatchRestaurant, MatchSwipe, MatchingService
 from app.services.restaurants.base import RestaurantProvider
+from app.services.restaurants.restaurant_search_service import RestaurantSearchService
 from app.services.sessions.room_code import generate_room_code
 
 logger = logging.getLogger(__name__)
 
 ROOM_CODE_PATTERN = re.compile(r"^[A-Z0-9]{6}$")
 NICKNAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .'\-]{0,23}$")
-MIN_RESTAURANTS = 10
 
 
 @dataclass
@@ -65,12 +66,15 @@ class SessionService:
         # group_size is only a planning hint. Ranking uses the people who actually join.
 
         intent = self._parse_intent(description, location)
+        updates: dict[str, object] = {}
         if location:
-            intent = intent.model_copy(update={"location": location})
+            updates["location"] = location
+        if payload.group_size is not None:
+            updates["group_size"] = payload.group_size
+        if updates:
+            intent = intent.model_copy(update=updates)
 
-        candidates = self.restaurants.search(intent)
-        if len(candidates) < MIN_RESTAURANTS:
-            raise ConflictError("Could not find enough restaurants for this dinner")
+        candidates = RestaurantSearchService(self.restaurants).build_deck(intent)
 
         dinner = Session(room_code=self._unique_room_code(), description=description, status="lobby")
         self.db.add(dinner)
@@ -159,6 +163,7 @@ class SessionService:
                     name=place.name,
                     description=place.description,
                     cuisine=place.cuisine,
+                    categories=_load_categories(place.categories),
                     price=place.price,
                     rating=place.rating,
                     latitude=place.latitude,
@@ -280,12 +285,14 @@ class SessionService:
                 .filter(Restaurant.source == candidate.source, Restaurant.external_id == candidate.external_id)
                 .one_or_none()
             )
+            encoded_categories = json.dumps(candidate.categories) if candidate.categories else None
             if restaurant is None:
                 restaurant = Restaurant(
                     external_id=candidate.external_id,
                     name=candidate.name,
                     description=candidate.description,
                     cuisine=candidate.cuisine,
+                    categories=encoded_categories,
                     price=candidate.price,
                     rating=candidate.rating,
                     latitude=candidate.latitude,
@@ -296,6 +303,8 @@ class SessionService:
                 )
                 self.db.add(restaurant)
                 self.db.flush()
+            elif encoded_categories and not restaurant.categories:
+                restaurant.categories = encoded_categories
             self.db.add(
                 SessionRestaurant(session_id=dinner.id, restaurant_id=restaurant.id, position=position)
             )
@@ -437,6 +446,18 @@ class SessionService:
             if exists is None:
                 return code
         raise ConflictError("Could not generate a room code. Try again.")
+
+
+def _load_categories(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed if isinstance(item, str)]
 
 
 def normalize_room_code(value: str) -> str:

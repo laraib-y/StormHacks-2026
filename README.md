@@ -162,7 +162,7 @@ From `backend`, with the virtual environment active:
 python -m pytest
 ```
 
-The tests cover sessions, room codes, joining, host authorization, restaurant normalization, mock and Geoapify fallbacks, the mock AI parser, Gemini response validation, swipes, the 80% match case, ranking ties, and WebSocket events.
+The tests cover sessions, room codes, joining, host authorization, restaurant normalization, deduplication, relevance ranking, deck diversity, mock and Geoapify fallbacks, the mock AI parser, Gemini response validation, swipes, the 80% match case, ranking ties, and WebSocket events.
 
 ## Architecture
 
@@ -177,6 +177,32 @@ RestaurantProvider
 ├── GeoapifyRestaurantProvider
 └── MockRestaurantProvider
 ```
+
+`RestaurantProvider` is the only restaurant source the rest of the app sees. Geoapify stays behind it. A missing `GEOAPIFY_API_KEY` or a failed Geoapify request falls back to `MockRestaurantProvider`. The key is never sent to the browser.
+
+When a dinner is created, one search builds the shared deck:
+
+```text
+Dinner Intent
+    ↓
+Restaurant Search Service
+    ↓
+Geoapify Provider
+    ↓
+Normalization
+    ↓
+Deduplication
+    ↓
+Hard Constraints
+    ↓
+Relevance Ranking
+    ↓
+Diversity Selection
+    ↓
+10–15 Restaurant Deck
+```
+
+The deck is usually 10 to 15 places. If only a few restaurants fit, the room gets those few. Budget and radius are hard limits when the provider actually has that data. Cuisine, rating, and vibe affect the order. The score is cuisine 40, price 25, location 15, rating 15, and category or vibe 5. Dietary labels are a ranking hint only, never a safety claim.
 
 `backend/app/services/matching/matching_service.py` ranks a restaurant with:
 

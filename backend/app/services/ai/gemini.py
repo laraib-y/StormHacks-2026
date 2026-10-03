@@ -58,9 +58,11 @@ def _prompt(description: str, location: str | None) -> str:
     hint = location.strip() if location else "none"
     return (
         "Convert the dinner request into JSON with exactly these keys: "
+        "group_size (integer 1-20 or null), "
         "cuisines (array of cuisine names), price_level (integer 1-4 or null), "
         "location (string or null), radius (integer meters, default 5000), "
-        "vibe (short string or null). "
+        "vibe (short string or null), "
+        "dietary_preferences (array of short labels such as vegetarian, or empty). "
         "price_level 1 is cheapest and 4 is most expensive. "
         "Do not include any other keys or commentary.\n"
         f"Location hint: {hint}\n"

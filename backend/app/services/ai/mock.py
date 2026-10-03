@@ -47,12 +47,37 @@ class MockAIService(AIService):
         chosen_location = " ".join(location.split()) if location and location.strip() else parsed_location
 
         return DinnerIntent(
+            group_size=_group_size(text),
             cuisines=cuisines,
             price_level=price_level,
             location=chosen_location,
             radius=5000,
             vibe=vibe,
+            dietary_preferences=_dietary(text),
         )
+
+
+def _group_size(text: str) -> int | None:
+    match = re.search(r"\b(\d{1,2})\s*(?:people|person|friends|of us)\b", text)
+    if not match:
+        return None
+    size = int(match.group(1))
+    if 1 <= size <= 20:
+        return size
+    return None
+
+
+def _dietary(text: str) -> list[str]:
+    found: list[str] = []
+    for label, pattern in (
+        ("vegetarian", r"vegetarian"),
+        ("vegan", r"vegan"),
+        ("gluten-free", r"gluten[ -]?free"),
+        ("halal", r"halal"),
+    ):
+        if re.search(pattern, text) and label not in found:
+            found.append(label)
+    return found
 
 
 def _price_level(text: str) -> int | None:

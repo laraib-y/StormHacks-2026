@@ -1,11 +1,13 @@
 import logging
+import re
 
 import httpx
 
 from app.schemas.ai import DinnerIntent
 from app.schemas.restaurant import RestaurantCandidate
-from app.services.restaurants.base import RestaurantProvider
+from app.services.restaurants.base import RestaurantProvider, RestaurantProviderError
 from app.services.restaurants.mock import MockRestaurantProvider
+from app.services.restaurants.restaurant_normalizer import distance_meters, valid_coordinate
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +72,9 @@ class GeoapifyRestaurantProvider(RestaurantProvider):
 
     def search(self, intent: DinnerIntent) -> list[RestaurantCandidate]:
         try:
-            found = self._search_live(intent)
-        except Exception as exc:
-            logger.warning("Geoapify request failed (%s). Using mock restaurants.", exc)
+            found = self.collect(intent)
+        except RestaurantProviderError as exc:
+            logger.warning("Geoapify request failed (%s). Using mock restaurants.", _safe_error(exc))
             found = []
 
         if len(found) >= MIN_RESULTS:
@@ -83,19 +85,26 @@ class GeoapifyRestaurantProvider(RestaurantProvider):
             return padded[:MAX_RESULTS]
         return self.fallback.search(intent)[:MAX_RESULTS]
 
-    def _search_live(self, intent: DinnerIntent) -> list[RestaurantCandidate]:
+    def collect(self, intent: DinnerIntent) -> list[RestaurantCandidate]:
+        """Fetch a candidate pool for one intent. Deck ranking happens later."""
+
         if not self.api_key.strip():
-            raise RuntimeError("GEOAPIFY_API_KEY is not configured")
+            raise RestaurantProviderError("GEOAPIFY_API_KEY is not configured")
 
         owns_client = self._client is None
         client = self._client or httpx.Client(timeout=8.0)
         try:
             latitude, longitude = self._geocode(client, intent.location or "Vancouver")
-            categories = _categories(intent)
-            features = self._places(client, latitude, longitude, intent.radius, categories)
-            if len(features) < MIN_RESULTS and categories != "catering.restaurant":
-                general = self._places(client, latitude, longitude, intent.radius, "catering.restaurant")
-                features = _merge_features(features, general)
+            features: list[dict] = []
+            for categories in category_groups(intent):
+                batch = self._places(client, latitude, longitude, intent.radius, categories, limit=20)
+                features = _merge_features(features, batch)
+                if len(features) >= 40:
+                    break
+        except RestaurantProviderError:
+            raise
+        except httpx.HTTPError as exc:
+            raise RestaurantProviderError(_safe_error(exc)) from exc
         finally:
             if owns_client:
                 client.close()
@@ -106,21 +115,25 @@ class GeoapifyRestaurantProvider(RestaurantProvider):
             candidate = normalize_geoapify_feature(feature)
             if candidate is None or candidate.external_id in seen:
                 continue
+            point = valid_coordinate(candidate.latitude, candidate.longitude)
+            if point is not None and distance_meters(latitude, longitude, point[0], point[1]) > intent.radius:
+                continue
             seen.add(candidate.external_id)
             restaurants.append(candidate)
-            if len(restaurants) >= MAX_RESULTS:
-                break
         return restaurants
 
     def _geocode(self, client: httpx.Client, location: str) -> tuple[float, float]:
-        response = client.get(
-            GEOCODE_URL,
-            params={"text": location, "limit": 1, "format": "json", "apiKey": self.api_key},
-        )
-        response.raise_for_status()
+        try:
+            response = client.get(
+                GEOCODE_URL,
+                params={"text": location, "limit": 1, "format": "json", "apiKey": self.api_key},
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise RestaurantProviderError(_safe_error(exc)) from exc
         results = response.json().get("results") or []
         if not results:
-            raise RuntimeError(f"No geocoding result for {location}")
+            raise RestaurantProviderError(f"No geocoding result for {location}")
         return float(results[0]["lat"]), float(results[0]["lon"])
 
     def _places(
@@ -130,21 +143,19 @@ class GeoapifyRestaurantProvider(RestaurantProvider):
         longitude: float,
         radius: int,
         categories: str,
+        limit: int = 20,
     ) -> list[dict]:
-        response = client.get(
-            PLACES_URL,
-            params={
-                "categories": categories,
-                "filter": f"circle:{longitude},{latitude},{radius}",
-                "bias": f"proximity:{longitude},{latitude}",
-                "limit": MAX_RESULTS,
-                "apiKey": self.api_key,
-            },
-        )
-        response.raise_for_status()
+        try:
+            response = client.get(
+                PLACES_URL,
+                params=build_places_params(latitude, longitude, radius, categories, self.api_key, limit),
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise RestaurantProviderError(_safe_error(exc)) from exc
         features = response.json().get("features") or []
         if not isinstance(features, list):
-            raise RuntimeError("Geoapify places response was not a feature list")
+            raise RestaurantProviderError("Geoapify places response was not a feature list")
         return features
 
 
@@ -172,20 +183,53 @@ def normalize_geoapify_feature(feature: dict) -> RestaurantCandidate | None:
     categories = properties.get("categories") if isinstance(properties.get("categories"), list) else []
     place_id = properties.get("place_id") or f"{name}:{latitude}:{longitude}"
     address = properties.get("formatted") or properties.get("address_line2")
+    point = valid_coordinate(_float_or_none(latitude), _float_or_none(longitude))
+    safe_lat, safe_lon = point if point else (None, None)
 
     return RestaurantCandidate(
         external_id=str(place_id)[:128],
         name=name.strip()[:160],
         description=_description(properties, categories),
         cuisine=_cuisine(categories),
+        categories=_category_labels(categories),
         price=_price(raw),
         rating=_rating(raw.get("rating", properties.get("rating"))),
-        latitude=latitude,
-        longitude=longitude,
-        address=str(address)[:255] if address else None,
+        latitude=safe_lat,
+        longitude=safe_lon,
+        address=str(address)[:255] if isinstance(address, str) and address.strip() else None,
         image_url=_image_url(properties.get("image") or raw.get("image")),
         source="geoapify",
     )
+
+
+def categories_for_intent(intent: DinnerIntent) -> str:
+    return _categories(intent)
+
+
+def category_groups(intent: DinnerIntent) -> list[str]:
+    found: list[str] = []
+    for cuisine in intent.cuisines:
+        category = _CATEGORY_BY_CUISINE.get(cuisine.lower())
+        if category and category not in found:
+            found.append(category)
+    return found or ["catering.restaurant"]
+
+
+def build_places_params(
+    latitude: float,
+    longitude: float,
+    radius: int,
+    categories: str,
+    api_key: str,
+    limit: int = 20,
+) -> dict[str, str | int]:
+    return {
+        "categories": categories,
+        "filter": f"circle:{longitude},{latitude},{radius}",
+        "bias": f"proximity:{longitude},{latitude}",
+        "limit": limit,
+        "apiKey": api_key,
+    }
 
 
 def _categories(intent: DinnerIntent) -> str:
@@ -197,6 +241,20 @@ def _categories(intent: DinnerIntent) -> str:
     if not found:
         return "catering.restaurant"
     return ",".join(found)
+
+
+def _category_labels(categories: list) -> list[str]:
+    labels: list[str] = []
+    for category in categories:
+        if not isinstance(category, str):
+            continue
+        tail = category.split(".")[-1].replace("_", " ").lower()
+        label = next((name for keyword, name in _CUISINE_LABELS.items() if keyword in tail), None)
+        if label is None and tail not in {"catering", "restaurant"}:
+            label = tail.title()
+        if label and label not in labels:
+            labels.append(label)
+    return labels[:8]
 
 
 def _cuisine(categories: list) -> str | None:
@@ -252,6 +310,10 @@ def _float_or_none(value: object) -> float | None:
         return float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+
+
+def _safe_error(exc: Exception) -> str:
+    return re.sub(r"(apiKey=)[^&\s]+", r"\1***", str(exc), flags=re.IGNORECASE)
 
 
 def _image_url(value: object) -> str | None:

@@ -39,7 +39,10 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(AppError)
     async def handle_app_error(_request: Request, exc: AppError) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        body: dict[str, str] = {"detail": exc.detail}
+        if exc.code:
+            body["code"] = exc.code
+        return JSONResponse(status_code=exc.status_code, content=body)
 
     @app.get("/")
     def root() -> dict[str, str]:
