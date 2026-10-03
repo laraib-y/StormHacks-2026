@@ -1,9 +1,11 @@
 export type DinnerIntent = {
+  group_size?: number | null;
   cuisines: string[];
   price_level: number | null;
   location: string | null;
   radius: number;
   vibe: string | null;
+  dietary_preferences?: string[];
 };
 
 export type Participant = {
@@ -37,6 +39,7 @@ export type Restaurant = {
   name: string;
   description: string | null;
   cuisine: string | null;
+  categories?: string[];
   price: number | null;
   rating: number | null;
   latitude: number | null;

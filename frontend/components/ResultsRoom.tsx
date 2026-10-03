@@ -74,10 +74,11 @@ export function ResultsRoom({ roomCode }: { roomCode: string }) {
             <p className="text-ink-soft">
               {top.likes} of {top.total_participants} people liked this restaurant.
             </p>
-            <p className="text-sm text-ink-soft">
-              {formatPrice(top.price)} · {formatRating(top.rating)}
-              {top.address ? ` · ${top.address}` : ""}
-            </p>
+            {[formatPrice(top.price), formatRating(top.rating), top.address].filter(Boolean).length > 0 ? (
+              <p className="text-sm text-ink-soft">
+                {[formatPrice(top.price), formatRating(top.rating), top.address].filter(Boolean).join(" · ")}
+              </p>
+            ) : null}
             <button
               type="button"
               onClick={() => setShowWhy((value) => !value)}

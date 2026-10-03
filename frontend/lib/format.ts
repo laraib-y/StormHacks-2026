@@ -1,11 +1,11 @@
 export function formatPrice(price: number | null) {
-  if (!price) return "Price varies";
+  if (!price) return null;
   return "$".repeat(Math.min(4, Math.max(1, price)));
 }
 
 export function formatRating(rating: number | null) {
-  if (rating == null) return "No rating yet";
-  return rating.toFixed(1);
+  if (rating == null) return null;
+  return `⭐ ${rating.toFixed(1)}`;
 }
 
 export function cuisineWash(cuisine: string | null) {

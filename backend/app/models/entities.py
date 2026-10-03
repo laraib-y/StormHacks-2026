@@ -61,6 +61,7 @@ class Restaurant(Base):
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     cuisine: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    categories: Mapped[str | None] = mapped_column(Text, nullable=True)
     price: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rating: Mapped[float | None] = mapped_column(Float, nullable=True)
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)

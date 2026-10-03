@@ -8,6 +8,7 @@ class RestaurantCandidate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str | None = None
     cuisine: str | None = None
+    categories: list[str] = Field(default_factory=list)
     price: int | None = Field(default=None, ge=1, le=4)
     rating: float | None = Field(default=None, ge=0, le=5)
     latitude: float | None = None
@@ -22,6 +23,7 @@ class RestaurantRead(BaseModel):
     name: str
     description: str | None
     cuisine: str | None
+    categories: list[str] = Field(default_factory=list)
     price: int | None
     rating: float | None
     latitude: float | None
